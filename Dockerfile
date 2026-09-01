@@ -1,6 +1,6 @@
 FROM eclipse-temurin:17-jdk-jammy
 ENV DEBIAN_FRONTEND=noninteractive ANDROID_HOME=/opt/android-sdk ANDROID_NDK_HOME=/opt/android-sdk/ndk/26.1.10909125 PATH=/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends curl git unzip python3 python3-pip ca-certificates && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends curl git unzip python3 python3-pip ca-certificates gh && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /opt/android-sdk/cmdline-tools \
