@@ -1,4 +1,5 @@
 name: Build and publish APKs
+run-name: APK build ${{ inputs.request_id || 'manual' }}
 
 on:
   workflow_dispatch:
@@ -19,6 +20,11 @@ on:
         required: true
         type: string
         default: main
+      request_id:
+        description: Correlation ID from the staff portal
+        required: false
+        type: string
+        default: manual
 
 permissions:
   contents: write
