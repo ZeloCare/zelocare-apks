@@ -20,6 +20,13 @@ on:
         type: string
         default: main
 
+  schedule:
+    # 08:00–20:00 → de 3 em 3 horas
+    - cron: "0 8,11,14,17,20 * * *"
+
+    # Durante a noite → de 4 em 4 horas
+    - cron: "0 0,4 * * *"
+
 permissions:
   contents: write
   packages: read
