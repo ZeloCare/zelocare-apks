@@ -1,80 +1,299 @@
-name: Build APKs
+name: Build and publish APKs
 
 on:
   workflow_dispatch:
     inputs:
       app:
-        description: 'App a compilar'
+        description: App a compilar
         required: true
         type: choice
         default: all
         options: [all, zelocare-mobile, zelocare-volunteer]
+      mobile_ref:
+        description: Branch, tag ou SHA de zelocare-mobile
+        required: true
+        type: string
+        default: main
+      volunteer_ref:
+        description: Branch, tag ou SHA de zelocare-volunteer
+        required: true
+        type: string
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zelocare-apk-publishing
+  cancel-in-progress: false
 
 jobs:
-  setup:
+  prepare:
+    name: Prepare build matrix
     runs-on: [self-hosted, zelocare-static]
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      matrix: ${{ steps.matrix.outputs.value }}
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_title: ${{ steps.release.outputs.title }}
     steps:
-      - id: set-matrix
+      - name: Validate inputs and create matrix
+        id: matrix
+        shell: bash
+        env:
+          SELECTED_APP: ${{ inputs.app }}
+          MOBILE_REF: ${{ inputs.mobile_ref }}
+          VOLUNTEER_REF: ${{ inputs.volunteer_ref }}
         run: |
-          if [ "${{ inputs.app }}" = "all" ]; then
-            echo 'matrix=["zelocare-mobile","zelocare-volunteer"]' >> $GITHUB_OUTPUT
-          else
-            echo 'matrix=["${{ inputs.app }}"]' >> $GITHUB_OUTPUT
-          fi
+          set -euo pipefail
+          [[ -n "$MOBILE_REF" ]] || { echo "mobile_ref não pode estar vazio" >&2; exit 1; }
+          [[ -n "$VOLUNTEER_REF" ]] || { echo "volunteer_ref não pode estar vazio" >&2; exit 1; }
+          mobile=$(jq -cn --arg ref "$MOBILE_REF" '{app:"zelocare-mobile",ref:$ref,package_id:"com.zelocare.app"}')
+          volunteer=$(jq -cn --arg ref "$VOLUNTEER_REF" '{app:"zelocare-volunteer",ref:$ref,package_id:"com.zelocare.volunteerv2"}')
+          case "$SELECTED_APP" in
+            all) value=$(jq -cn --argjson mobile "$mobile" --argjson volunteer "$volunteer" '{include:[$mobile,$volunteer]}') ;;
+            zelocare-mobile) value=$(jq -cn --argjson mobile "$mobile" '{include:[$mobile]}') ;;
+            zelocare-volunteer) value=$(jq -cn --argjson volunteer "$volunteer" '{include:[$volunteer]}') ;;
+            *) echo "Aplicação inválida: $SELECTED_APP" >&2; exit 1 ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Define immutable release identifier
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          built_at=$(date -u +'%Y-%m-%d %H:%M UTC')
+          echo "tag=build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "title=ZeloCare APKs · ${built_at}" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: setup
+    name: Build ${{ matrix.app }}
+    needs: prepare
     runs-on: [self-hosted, zelocare-static]
+    timeout-minutes: 120
     strategy:
-      matrix:
-        app: ${{ fromJSON(needs.setup.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      KEYSTORE_BASE64: ${{ matrix.app == 'zelocare-mobile' && secrets.MOBILE_ANDROID_KEYSTORE_BASE64 || secrets.VOLUNTEER_ANDROID_KEYSTORE_BASE64 }}
+      KEY_ALIAS: ${{ matrix.app == 'zelocare-mobile' && secrets.MOBILE_ANDROID_KEY_ALIAS || secrets.VOLUNTEER_ANDROID_KEY_ALIAS }}
+      KEYSTORE_PASSWORD: ${{ matrix.app == 'zelocare-mobile' && secrets.MOBILE_ANDROID_STORE_PASSWORD || secrets.VOLUNTEER_ANDROID_STORE_PASSWORD }}
+      KEY_PASSWORD: ${{ matrix.app == 'zelocare-mobile' && secrets.MOBILE_ANDROID_KEY_PASSWORD || secrets.VOLUNTEER_ANDROID_KEY_PASSWORD }}
+      EXPECTED_CERT_SHA256: ${{ matrix.app == 'zelocare-mobile' && secrets.MOBILE_ANDROID_CERT_SHA256 || secrets.VOLUNTEER_ANDROID_CERT_SHA256 }}
     steps:
-      - name: Checkout apks repo
+      - name: Checkout APK repository
         uses: actions/checkout@v4
 
-      - name: Checkout ${{ matrix.app }}
+      - name: Require source repository token
+        env:
+          SOURCE_REPOS_TOKEN: ${{ secrets.SOURCE_REPOS_TOKEN }}
+        run: |
+          if [[ -z "$SOURCE_REPOS_TOKEN" ]]; then
+            echo "Falta o secret SOURCE_REPOS_TOKEN com acesso read-only a zelocare-mobile e zelocare-volunteer." >&2
+            exit 1
+          fi
+
+      - name: Checkout ${{ matrix.app }} at ${{ matrix.ref }}
         uses: actions/checkout@v4
         with:
           repository: ZeloCare/${{ matrix.app }}
-          token: ${{ secrets.GH_PAT }}
-          path: ${{ matrix.app }}
+          ref: ${{ matrix.ref }}
+          token: ${{ secrets.SOURCE_REPOS_TOKEN }}
+          path: source
+          fetch-depth: 1
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: source/package-lock.json
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install NDK + CMake
+      - name: Install Android build dependencies
         run: |
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
-      - name: Verify JDK 17
-        run: java -version
+      - name: Validate signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in KEYSTORE_BASE64 KEY_ALIAS KEYSTORE_PASSWORD KEY_PASSWORD EXPECTED_CERT_SHA256; do
+            [[ -n "${!name}" ]] || { echo "Secret de assinatura em falta: $name" >&2; exit 1; }
+          done
 
-      - name: Install deps
+      - name: Install dependencies
+        working-directory: source
         run: npm ci --legacy-peer-deps
-        working-directory: ${{ matrix.app }}
 
-      - name: Prebuild android
+      - name: Typecheck
+        working-directory: source
+        run: npx tsc --noEmit
+
+      - name: Test mobile app
+        if: matrix.app == 'zelocare-mobile'
+        working-directory: source
+        run: npx jest --passWithNoTests --runInBand
+
+      - name: Define monotonically increasing version code
+        shell: bash
+        run: echo "VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+
+      - name: Set Android version code
+        working-directory: source
+        env:
+          BUILD_VERSION_CODE: ${{ env.VERSION_CODE }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+          config.expo.android = config.expo.android || {};
+          config.expo.android.versionCode = Number(process.env.BUILD_VERSION_CODE);
+          fs.writeFileSync('app.json', `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Generate Android project
+        working-directory: source
         run: npx expo prebuild --platform android --non-interactive
-        working-directory: ${{ matrix.app }}
 
-      - name: Build APK
-        run: ./gradlew assembleRelease
-        working-directory: ${{ matrix.app }}/android
+      - name: Decode release keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          keystore_path="$RUNNER_TEMP/${{ matrix.app }}-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          echo "KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
-      - name: Upload APK artifact
+      - name: Build signed release APK
+        working-directory: source/android
+        run: |
+          ./gradlew --no-daemon assembleRelease \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      - name: Validate and package APK
+        shell: bash
+        env:
+          EXPECTED_PACKAGE_ID: ${{ matrix.package_id }}
+          SOURCE_REF: ${{ matrix.ref }}
+          APP_NAME: ${{ matrix.app }}
+        run: |
+          set -euo pipefail
+          apk="source/android/app/build/outputs/apk/release/app-release.apk"
+          [[ -s "$apk" ]] || { echo "APK release não foi gerado" >&2; exit 1; }
+          actual_package=$(apkanalyzer manifest application-id "$apk")
+          [[ "$actual_package" == "$EXPECTED_PACKAGE_ID" ]] || { echo "Package ID inesperado: $actual_package (esperado: $EXPECTED_PACKAGE_ID)" >&2; exit 1; }
+          signature=$(apksigner verify --verbose --print-certs "$apk")
+          printf '%s\n' "$signature"
+          actual_cert=$(printf '%s\n' "$signature" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1 | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          expected_cert=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          [[ -n "$actual_cert" && "$actual_cert" == "$expected_cert" ]] || { echo "Fingerprint da assinatura não corresponde ao secret configurado." >&2; exit 1; }
+          app_version=$(node -p "require('./source/app.json').expo.version")
+          source_sha=$(git -C source rev-parse HEAD)
+          short_sha=${source_sha:0:12}
+          versioned_name="${APP_NAME}-v${app_version}-b${VERSION_CODE}-${short_sha}.apk"
+          mkdir -p publish
+          cp "$apk" "publish/$versioned_name"
+          (cd publish && sha256sum "$versioned_name" > "${versioned_name}.sha256")
+          jq -n --arg app "$APP_NAME" --arg version "$app_version" --argjson version_code "$VERSION_CODE" \
+            --arg requested_ref "$SOURCE_REF" --arg source_sha "$source_sha" --arg package_id "$actual_package" \
+            --arg certificate_sha256 "$actual_cert" --arg apk "$versioned_name" --arg built_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{app:$app,version:$version,version_code:$version_code,requested_ref:$requested_ref,source_sha:$source_sha,package_id:$package_id,certificate_sha256:$certificate_sha256,apk:$apk,built_at:$built_at}' \
+            > "publish/${APP_NAME}-metadata.json"
+
+      - name: Upload validated package
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-apk
-          path: ${{ matrix.app }}/android/app/build/outputs/apk/release/app-release.apk
+          name: signed-${{ matrix.app }}
+          path: publish/*
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Remove decoded keystore
+        if: always()
+        run: |
+          if [[ -n "${KEYSTORE_PATH:-}" ]]; then
+            rm -f "$KEYSTORE_PATH"
+          fi
+
+  publish:
+    name: Publish GitHub releases
+    needs: [prepare, build]
+    runs-on: [self-hosted, zelocare-static]
+    steps:
+      - name: Checkout APK repository
+        uses: actions/checkout@v4
+
+      - name: Download signed APKs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: signed-*
+          path: publish
+          merge-multiple: true
+
+      - name: Prepare release assets and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          metadata=(publish/*-metadata.json)
+          [[ ${#metadata[@]} -gt 0 ]] || { echo "Não existem metadados para publicar" >&2; exit 1; }
+          {
+            echo "Build manual de APKs ZeloCare."
+            echo
+            echo "| App | Versão | Version code | Ref solicitada | Commit | Package |"
+            echo "| --- | --- | ---: | --- | --- | --- |"
+            for file in "${metadata[@]}"; do
+              jq -r '"| \(.app) | \(.version) | \(.version_code) | `\(.requested_ref)` | `\(.source_sha[0:12])` | `\(.package_id)` |"' "$file"
+            done
+            echo
+            echo 'Os ficheiros `.sha256` permitem verificar a integridade dos APKs.'
+          } > release-notes.md
+          mkdir -p latest
+          for file in "${metadata[@]}"; do
+            app=$(jq -r '.app' "$file")
+            apk=$(jq -r '.apk' "$file")
+            cp "publish/$apk" "latest/${app}-latest.apk"
+            (cd latest && sha256sum "${app}-latest.apk" > "${app}-latest.apk.sha256")
+            cp "$file" "latest/${app}-metadata.json"
+          done
+
+      - name: Create immutable historical release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_TITLE: ${{ needs.prepare.outputs.release_title }}
+        run: gh release create "$RELEASE_TAG" publish/* --title "$RELEASE_TITLE" --notes-file release-notes.md --target "$GITHUB_SHA"
+
+      - name: Create or update latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --title "ZeloCare APKs · latest" \
+              --notes "Downloads internos mais recentes das aplicações ZeloCare." --target "$GITHUB_SHA"
+          fi
+          gh release upload latest latest/* --clobber
+          gh release edit latest --latest
+
+      - name: Publish run summary
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          {
+            echo "## APKs publicados"
+            echo
+            echo "- [Release histórica](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})"
+            echo "- [Downloads latest](https://github.com/${GITHUB_REPOSITORY}/releases/tag/latest)"
+          } >> "$GITHUB_STEP_SUMMARY"
