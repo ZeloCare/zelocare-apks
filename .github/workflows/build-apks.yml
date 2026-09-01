@@ -1,0 +1,72 @@
+name: Build APKs
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App a compilar'
+        required: true
+        type: choice
+        default: all
+        options: [all, zelocare-mobile, zelocare-volunteer]
+
+jobs:
+  setup:
+    runs-on: [self-hosted, zelocare-static]
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ inputs.app }}" = "all" ]; then
+            echo 'matrix=["zelocare-mobile","zelocare-volunteer"]' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix=["${{ inputs.app }}"]' >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: setup
+    runs-on: [self-hosted, zelocare-static]
+    strategy:
+      matrix:
+        app: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout apks repo
+        uses: actions/checkout@v4
+
+      - name: Checkout ${{ matrix.app }}
+        uses: actions/checkout@v4
+        with:
+          repository: ZeloCare/${{ matrix.app }}
+          token: ${{ secrets.GH_PAT }}
+          path: ${{ matrix.app }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install deps
+        run: npm ci --legacy-peer-deps
+        working-directory: ${{ matrix.app }}
+
+      - name: Prebuild android
+        run: npx expo prebuild --platform android --non-interactive
+        working-directory: ${{ matrix.app }}
+
+      - name: Build APK
+        run: ./gradlew assembleRelease
+        working-directory: ${{ matrix.app }}/android
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app }}-apk
+          path: ${{ matrix.app }}/android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
