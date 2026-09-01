@@ -1,5 +1,4 @@
 name: Build and publish APKs
-run-name: APK build ${{ inputs.request_id || 'manual' }}
 
 on:
   workflow_dispatch:
@@ -20,11 +19,6 @@ on:
         required: true
         type: string
         default: main
-      request_id:
-        description: Correlation ID from the staff portal
-        required: false
-        type: string
-        default: manual
 
 permissions:
   contents: write
@@ -37,6 +31,7 @@ jobs:
   prepare:
     name: Prepare build matrix
     runs-on: [self-hosted, zelocare-static]
+    container: ghcr.io/zelocare/zelocare-apk-builder:dev
     outputs:
       matrix: ${{ steps.matrix.outputs.value }}
       release_tag: ${{ steps.release.outputs.tag }}
@@ -76,6 +71,7 @@ jobs:
     name: Build ${{ matrix.app }}
     needs: prepare
     runs-on: [self-hosted, zelocare-static]
+    container: ghcr.io/zelocare/zelocare-apk-builder:dev
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -237,6 +233,7 @@ jobs:
     name: Publish GitHub releases
     needs: [prepare, build]
     runs-on: [self-hosted, zelocare-static]
+    container: ghcr.io/zelocare/zelocare-apk-builder:dev
     steps:
       - name: Checkout APK repository
         uses: actions/checkout@v4
