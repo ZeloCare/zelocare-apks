@@ -7,6 +7,7 @@ Repositório público de distribuição interna dos APKs Android da ZeloCare:
 
 Os binários são publicados em [GitHub Releases](../../releases); não são adicionados ao histórico Git.
 
+
 ## Gerar APKs
 
 1. Abre **Actions → Build and publish APKs → Run workflow**.
