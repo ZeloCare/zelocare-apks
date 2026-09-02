@@ -39,11 +39,6 @@ jobs:
   prepare:
     name: Prepare build matrix
     runs-on: [self-hosted, zelocare-static]
-    container:
-      image: ghcr.io/zelocare/zelocare-apk-builder:dev
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       matrix: ${{ steps.matrix.outputs.value }}
       release_tag: ${{ steps.release.outputs.tag }}
@@ -83,11 +78,6 @@ jobs:
     name: Build ${{ matrix.app }}
     needs: prepare
     runs-on: [self-hosted, zelocare-static]
-    container:
-      image: ghcr.io/zelocare/zelocare-apk-builder:dev
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -249,11 +239,6 @@ jobs:
     name: Publish GitHub releases
     needs: [prepare, build]
     runs-on: [self-hosted, zelocare-static]
-    container:
-      image: ghcr.io/zelocare/zelocare-apk-builder:dev
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout APK repository
         uses: actions/checkout@v4
